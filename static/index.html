@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Code Agent</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <span class="logo" id="app-logo">🤖</span>
+                <h1 id="app-title">AI Code Agent</h1>
+            </div>
+            <div class="header-right">
+                <div class="credits-pill" id="credits-pill" title="Số dư tài khoản OpenRouter còn lại">
+                    <span id="credits-amount">💳 Số dư: $--</span>
+                    <button type="button" class="btn-icon" onclick="fetchCredits(true)" title="Kiểm tra lại số dư OpenRouter">🔄</button>
+                </div>
+                <button type="button" class="btn btn-sm btn-ghost" onclick="openThemeModal()" title="Tùy biến tên & giao diện">
+                    🎨 Tùy biến
+                </button>
+                <div class="conn-indicator">
+                    <span id="conn-status" class="conn-dot disconnected" title="Chưa kết nối"></span>
+                    <span id="conn-text" class="conn-text">Chưa kết nối</span>
+                </div>
+            </div>
+        </header>
+
+        <!-- API Key -->
+        <div class="card api-key-card">
+            <label for="api-key">🔑 OpenRouter API Key</label>
+            <div class="api-key-row">
+                <input type="password" id="api-key" placeholder="sk-or-..." autocomplete="off">
+                <button id="btn-save-key" class="btn btn-sm btn-primary" onclick="saveApiKey()">Lưu</button>
+                <button class="btn btn-sm btn-ghost" onclick="toggleKeyVisibility()" title="Hiện/Ẩn key">👁</button>
+                <button class="btn btn-sm btn-ghost btn-danger-text" onclick="clearApiKey()" title="Xóa API Key đã lưu">🗑️</button>
+            </div>
+        </div>
+
+        <!-- Interaction Card -->
+        <div class="card interaction-card" id="drop-zone">
+            <!-- Mode Switcher -->
+            <div class="mode-switcher-row">
+                <span class="mode-label">Chế độ hoạt động:</span>
+                <div class="mode-toggle-group">
+                    <button type="button" class="mode-btn active" id="btn-mode-pipeline" onclick="switchMode('pipeline')">
+                        ⚡ Lập trình tự động (4 AI)
+                    </button>
+                    <button type="button" class="mode-btn" id="btn-mode-chat" onclick="switchMode('chat')">
+                        💬 Trò chuyện & Hỏi đáp
+                    </button>
+                </div>
+            </div>
+
+            <!-- Text Input Area -->
+            <div class="input-wrapper">
+                <label for="command" id="input-label">📝 Yêu cầu lập trình của bạn</label>
+                <textarea id="command" rows="4"
+                    placeholder="Ví dụ: Tạo logic tính cashback 5% cho đơn hàng, tối đa 50.000đ"></textarea>
+            </div>
+
+            <!-- File Upload & Attachment Area -->
+            <div class="attachments-area">
+                <div class="attachments-actions">
+                    <button type="button" class="btn btn-sm btn-ghost" onclick="triggerFileUpload()">
+                        📎 Tải file lên (.py, .txt, .json, .zip...)
+                    </button>
+                    <input type="file" id="file-uploader" multiple accept=".py,.txt,.md,.json,.csv,.html,.css,.js,.zip" style="display:none;" onchange="handleFileUpload(event)">
+                    <span class="attachment-hint" id="attachment-hint">Bạn có thể đính kèm file code hoặc tài liệu để AI đọc</span>
+                </div>
+                <div class="attached-chips-list" id="attached-chips-list"></div>
+            </div>
+
+            <!-- Action Buttons -->
+            <div class="btn-row">
+                <button id="btn-run" class="btn btn-primary" onclick="handleMainAction()">▶ Chạy</button>
+                <button id="btn-stop" class="btn btn-danger" onclick="stop()" disabled>⏹ Dừng</button>
+                <button id="btn-reset" class="btn btn-ghost" onclick="reset()">🔄 Làm lại</button>
+            </div>
+        </div>
+
+        <!-- Progress Bar -->
+        <div id="progress-wrap" class="progress-wrap hidden">
+            <div class="progress-bar">
+                <div id="progress-fill" class="progress-fill"></div>
+            </div>
+            <span id="progress-label" class="progress-label"></span>
+        </div>
+
+        <!-- Token Usage Tracker (Thời gian thực) -->
+        <div id="token-tracker" class="token-tracker hidden">
+            <div class="token-summary">
+                <span class="token-title">📊 Token tiêu thụ:</span>
+                <span class="token-badge-total" id="token-total-count">0</span>
+                <span class="token-sub-detail" id="token-detail">(Prompt: 0 | Output: 0)</span>
+            </div>
+            <div class="token-roles-grid" id="token-roles-grid">
+                <div class="token-role-pill">
+                    <span class="pill-dot role-planner"></span>
+                    <span class="pill-name">Kiến trúc sư:</span>
+                    <span class="pill-val" id="token-val-planner">0</span>
+                </div>
+                <div class="token-role-pill">
+                    <span class="pill-dot role-tester"></span>
+                    <span class="pill-name">Kiểm thử:</span>
+                    <span class="pill-val" id="token-val-tester">0</span>
+                </div>
+                <div class="token-role-pill">
+                    <span class="pill-dot role-coder"></span>
+                    <span class="pill-name">Coder:</span>
+                    <span class="pill-val" id="token-val-coder">0</span>
+                </div>
+                <div class="token-role-pill">
+                    <span class="pill-dot role-reviewer"></span>
+                    <span class="pill-name">Reviewer:</span>
+                    <span class="pill-val" id="token-val-reviewer">0</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="tabs-container">
+            <div class="tabs-nav">
+                <button class="tab active" data-tab="log" onclick="switchTab('log')">📋 Tiến trình</button>
+                <button class="tab" data-tab="spec" onclick="switchTab('spec')">📐 Đặc tả</button>
+                <button class="tab" data-tab="code" onclick="switchTab('code')">💻 Code</button>
+                <button class="tab" data-tab="download" onclick="switchTab('download')">📁 Tải về</button>
+            </div>
+
+            <!-- Log Tab -->
+            <div id="tab-log" class="tab-content active">
+                <div id="log-area" class="log-area">
+                    <div class="log-placeholder">Nhấn "Chạy" để bắt đầu...</div>
+                </div>
+            </div>
+
+            <!-- Spec Tab -->
+            <div id="tab-spec" class="tab-content">
+                <div id="spec-area" class="spec-area">
+                    <div class="log-placeholder">Đặc tả sẽ hiển thị ở đây sau khi kiến trúc sư hoàn thành.</div>
+                </div>
+            </div>
+
+            <!-- Code Tab -->
+            <div id="tab-code" class="tab-content">
+                <div id="file-tabs" class="file-tabs"></div>
+                <textarea id="code-area" class="code-area"
+                    placeholder="Code sẽ hiển thị ở đây. Bạn cũng có thể dán code hiện có vào đây trước khi chạy."></textarea>
+            </div>
+
+            <!-- Download Tab -->
+            <div id="tab-download" class="tab-content">
+                <div class="download-area">
+                    <div id="download-status" class="log-placeholder">Chưa có file để tải.</div>
+                    <button id="btn-download" class="btn btn-primary btn-lg hidden" onclick="downloadZip()">
+                        📦 Tải project.zip
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Settings -->
+        <div class="card settings-card">
+            <button class="settings-toggle" onclick="toggleSettings()">
+                <span>⚙️ Cài đặt model và số vòng</span>
+                <span id="settings-arrow" class="arrow">▸</span>
+            </button>
+
+            <!-- Dynamic Preset Switcher & Manager -->
+            <div class="preset-container">
+                <div class="preset-top-row">
+                    <span class="preset-title">⚡ Chế độ cấu hình Model:</span>
+                    <div class="preset-global-actions">
+                        <button type="button" class="btn btn-xs btn-ghost" onclick="addNewPreset()" title="Tạo thêm chế độ cấu hình mới">+ Thêm mới</button>
+                        <button type="button" class="btn btn-xs btn-ghost" onclick="resetToDefaultPresets()" title="Khôi phục lại danh sách 3 chế độ mặc định ban đầu">🔄 Khôi phục gốc</button>
+                    </div>
+                </div>
+                <div class="preset-buttons" id="preset-buttons-container">
+                    <!-- Rendered dynamically via JavaScript -->
+                </div>
+            </div>
+
+            <div id="settings-body" class="settings-body hidden">
+                <div class="settings-sub-header">
+                    <div class="preset-current-indicator">
+                        <span>Đang chọn: <strong id="current-preset-name">...</strong></span>
+                        <button type="button" class="btn btn-xs btn-ghost" onclick="renameCurrentPreset()" title="Đổi tên chế độ này">✏️ Đổi tên</button>
+                    </div>
+                    <div class="custom-preset-actions">
+                        <button type="button" class="btn btn-sm btn-primary" onclick="saveCurrentPresetChanges()" title="Lưu các model bên dưới đè vào chế độ này">
+                            💾 Lưu thay đổi
+                        </button>
+                        <button type="button" class="btn btn-sm btn-ghost btn-danger-text" onclick="deleteCurrentPreset()" title="Xóa chế độ này khỏi danh sách">
+                            🗑️ Xóa chế độ này
+                        </button>
+                    </div>
+                </div>
+                <div class="settings-grid">
+                    <div class="field">
+                        <label>Danh sách model mặc định</label>
+                        <input type="text" id="default-models"
+                            value="deepseek/deepseek-chat, google/gemini-2.0-flash-001">
+                    </div>
+                    <div class="field">
+                        <label>📐 Kiến trúc sư (Planner)</label>
+                        <input type="text" id="planner-models" placeholder="Để trống = mặc định">
+                    </div>
+                    <div class="field">
+                        <label>🧪 Kiểm thử viên (Tester)</label>
+                        <input type="text" id="tester-models" placeholder="Để trống = mặc định">
+                    </div>
+                    <div class="field">
+                        <label>💻 Lập trình viên (Coder)</label>
+                        <input type="text" id="coder-models" placeholder="Để trống = mặc định">
+                    </div>
+                    <div class="field">
+                        <label>🔍 Reviewer</label>
+                        <input type="text" id="reviewer-models" placeholder="Để trống = mặc định">
+                    </div>
+                </div>
+                <div class="settings-row">
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="use-planner" checked>
+                        Dùng kiến trúc sư (lập kế hoạch)
+                    </label>
+                    <label class="checkbox-label">
+                        <input type="checkbox" id="use-reviewer" checked>
+                        Dùng reviewer (soát lỗi cuối)
+                    </label>
+                </div>
+                <div class="field">
+                    <label>Số vòng sửa lỗi tối đa: <strong id="rounds-val">5</strong></label>
+                    <input type="range" id="max-rounds" min="1" max="8" value="5"
+                        oninput="document.getElementById('rounds-val').textContent=this.value">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Theme & UI Customization Modal -->
+    <div id="theme-modal" class="modal-backdrop hidden" onclick="if(event.target===this)closeThemeModal()">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>🎨 Tùy biến giao diện & Tên ứng dụng</h3>
+                <button type="button" class="modal-close-btn" onclick="closeThemeModal()">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="field">
+                    <label>Tên ứng dụng / Tiêu đề hiển thị</label>
+                    <input type="text" id="custom-app-title" placeholder="AI Code Agent">
+                </div>
+
+                <div class="field">
+                    <label>Biểu tượng Logo (Emoji)</label>
+                    <div class="emoji-picker-row">
+                        <button type="button" class="emoji-opt" onclick="setLogoEmoji('🤖')">🤖</button>
+                        <button type="button" class="emoji-opt" onclick="setLogoEmoji('⚡')">⚡</button>
+                        <button type="button" class="emoji-opt" onclick="setLogoEmoji('🚀')">🚀</button>
+                        <button type="button" class="emoji-opt" onclick="setLogoEmoji('🧠')">🧠</button>
+                        <button type="button" class="emoji-opt" onclick="setLogoEmoji('💻')">💻</button>
+                        <button type="button" class="emoji-opt" onclick="setLogoEmoji('🔮')">🔮</button>
+                        <button type="button" class="emoji-opt" onclick="setLogoEmoji('🔥')">🔥</button>
+                        <input type="text" id="custom-app-logo" maxlength="4" style="width: 55px; text-align: center;" placeholder="Khác">
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label>Màu chủ đạo (Accent Color)</label>
+                    <div class="color-picker-row">
+                        <button type="button" class="color-swatch" style="background: #58a6ff;" onclick="setThemeAccent('#58a6ff')" title="Xanh Lam GitHub"></button>
+                        <button type="button" class="color-swatch" style="background: #a78bfa;" onclick="setThemeAccent('#a78bfa')" title="Tím Cyberpunk"></button>
+                        <button type="button" class="color-swatch" style="background: #3fb950;" onclick="setThemeAccent('#3fb950')" title="Xanh Lá Terminal"></button>
+                        <button type="button" class="color-swatch" style="background: #f0883e;" onclick="setThemeAccent('#f0883e')" title="Cam Amber"></button>
+                        <button type="button" class="color-swatch" style="background: #f43f5e;" onclick="setThemeAccent('#f43f5e')" title="Hồng Neon"></button>
+                        <button type="button" class="color-swatch" style="background: #22d3ee;" onclick="setThemeAccent('#22d3ee')" title="Xanh Ngọc Cyan"></button>
+                        <input type="color" id="custom-accent-color" title="Chọn mã màu tùy ý" onchange="setThemeAccent(this.value)">
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label>Phong cách nền (Background Style)</label>
+                    <div class="theme-bg-row">
+                        <label class="radio-label">
+                            <input type="radio" name="theme-bg" value="github" checked onchange="setThemeBg(this.value)">
+                            <span>GitHub Dark</span>
+                        </label>
+                        <label class="radio-label">
+                            <input type="radio" name="theme-bg" value="oled" onchange="setThemeBg(this.value)">
+                            <span>OLED Đen sâu</span>
+                        </label>
+                        <label class="radio-label">
+                            <input type="radio" name="theme-bg" value="midnight" onchange="setThemeBg(this.value)">
+                            <span>Midnight Navy</span>
+                        </label>
+                        <label class="radio-label">
+                            <input type="radio" name="theme-bg" value="slate" onchange="setThemeBg(this.value)">
+                            <span>Slate Than chì</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="field">
+                    <label>Hạn mức Token cảnh báo (0 = không cảnh báo)</label>
+                    <input type="number" id="custom-token-budget" placeholder="Ví dụ: 30000" min="0" step="5000">
+                    <small style="color: var(--text-secondary); font-size: 11.5px; display: block; margin-top: 4px;">
+                        Hệ thống sẽ chuyển màu cảnh báo khi lượng token tiêu thụ vượt ngưỡng này.
+                    </small>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-ghost" onclick="resetThemeDefaults()">Khôi phục mặc định</button>
+                <button type="button" class="btn btn-primary" onclick="saveThemeSettings()">Lưu & Áp dụng</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast container -->
+    <div id="toast-container" class="toast-container"></div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
