@@ -1,0 +1,9 @@
+# Image dùng để chạy test do AI sinh ra một cách cô lập (SANDBOX=docker).
+#   docker build -t agent-sandbox -f Dockerfile.sandbox .
+# Container chạy với --network none, giới hạn RAM/CPU/số tiến trình (xem utils.py).
+FROM python:3.12-slim
+
+# Thêm thư viện mà code sinh ra có thể import khi chạy test.
+RUN pip install --no-cache-dir pytest python-telegram-bot
+
+WORKDIR /work

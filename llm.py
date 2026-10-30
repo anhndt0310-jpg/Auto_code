@@ -1,11 +1,11 @@
 """
 llm.py — Async LLM client for OpenRouter API.
-Uses httpx.AsyncClient with exponential backoff and model rotation.
+Uses httpx.AsyncClient with exponential backoff, Retry-After support and model rotation.
 """
 
 import asyncio
 import logging
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import httpx
 
@@ -17,6 +17,29 @@ API_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 # Timeout for a single LLM request (connect, read)
 REQUEST_TIMEOUT = httpx.Timeout(connect=15.0, read=120.0, write=15.0, pool=15.0)
+
+# Status codes that apply to the whole account/key, not to one model.
+# Rotating to another model cannot fix them, so we fail immediately.
+FATAL_STATUS = {401: "API key không hợp lệ", 402: "Tài khoản OpenRouter hết credit"}
+
+MAX_RETRY_AFTER = 30.0
+
+
+class FatalLLMError(RuntimeError):
+    """Error that no other model can recover from (bad key, no credit...)."""
+
+
+def _backoff(attempt: int, response: Optional[httpx.Response] = None) -> float:
+    """Exponential backoff, honouring a Retry-After header when present."""
+    wait = float(2 ** (attempt + 1))
+    if response is not None:
+        raw = response.headers.get("retry-after")
+        if raw:
+            try:
+                wait = max(wait, min(float(raw), MAX_RETRY_AFTER))
+            except ValueError:
+                pass
+    return wait
 
 
 # ─────────────────────────── Core LLM Call ──────────────────────────────────
@@ -32,6 +55,8 @@ async def call_llm(
 
     Returns:
         (content, usage_dict) — assistant's reply and token usage dictionary.
+    Raises:
+        FatalLLMError for key/credit problems, RuntimeError for everything else.
     """
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -44,30 +69,30 @@ async def call_llm(
         "messages": messages,
     }
 
-    last_error: Exception | None = None
+    last_error: Optional[Exception] = None
 
     async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         for attempt in range(retries):
             try:
                 response = await client.post(API_URL, json=payload, headers=headers)
 
-                if response.status_code == 429:
-                    wait = 2 ** (attempt + 1)
-                    logger.warning(
-                        "Rate limited by %s (429). Retrying in %ds…", model, wait
+                if response.status_code in FATAL_STATUS:
+                    raise FatalLLMError(
+                        f"{FATAL_STATUS[response.status_code]} "
+                        f"(HTTP {response.status_code}): {response.text[:300]}"
                     )
-                    await asyncio.sleep(wait)
-                    continue
 
-                if response.status_code >= 500:
-                    wait = 2 ** (attempt + 1)
-                    logger.warning(
-                        "Server error %d from %s. Retrying in %ds…",
-                        response.status_code,
-                        model,
-                        wait,
+                if response.status_code == 429 or response.status_code >= 500:
+                    wait = _backoff(attempt, response)
+                    last_error = RuntimeError(
+                        f"HTTP {response.status_code} from {model}: {response.text[:200]}"
                     )
-                    await asyncio.sleep(wait)
+                    logger.warning(
+                        "HTTP %d from %s (attempt %d/%d). Retrying in %.0fs…",
+                        response.status_code, model, attempt + 1, retries, wait,
+                    )
+                    if attempt < retries - 1:
+                        await asyncio.sleep(wait)
                     continue
 
                 response.raise_for_status()
@@ -96,20 +121,21 @@ async def call_llm(
 
                 return content, usage
 
+            except FatalLLMError:
+                raise
+
             except httpx.TimeoutException as exc:
                 last_error = exc
-                wait = 2 ** (attempt + 1)
+                wait = _backoff(attempt)
                 logger.warning(
-                    "Timeout calling %s (attempt %d/%d). Retrying in %ds…",
-                    model,
-                    attempt + 1,
-                    retries,
-                    wait,
+                    "Timeout calling %s (attempt %d/%d). Retrying in %.0fs…",
+                    model, attempt + 1, retries, wait,
                 )
-                await asyncio.sleep(wait)
+                if attempt < retries - 1:
+                    await asyncio.sleep(wait)
 
             except httpx.HTTPStatusError as exc:
-                # Non-retryable HTTP error (4xx except 429)
+                # Non-retryable HTTP error (4xx except 429 / fatal ones)
                 raise RuntimeError(
                     f"HTTP {exc.response.status_code} from {model}: "
                     f"{exc.response.text[:500]}"
@@ -117,16 +143,13 @@ async def call_llm(
 
             except Exception as exc:
                 last_error = exc
-                wait = 2 ** (attempt + 1)
+                wait = _backoff(attempt)
                 logger.warning(
-                    "Error calling %s (attempt %d/%d): %s. Retrying in %ds…",
-                    model,
-                    attempt + 1,
-                    retries,
-                    exc,
-                    wait,
+                    "Error calling %s (attempt %d/%d): %s. Retrying in %.0fs…",
+                    model, attempt + 1, retries, exc, wait,
                 )
-                await asyncio.sleep(wait)
+                if attempt < retries - 1:
+                    await asyncio.sleep(wait)
 
     raise RuntimeError(
         f"Failed to call {model} after {retries} retries. Last error: {last_error}"
@@ -162,6 +185,10 @@ async def call_role(
             if i > 0:
                 notes.append(f"Đã chuyển sang model {model} sau {i} lần thử thất bại.")
             return reply, model, notes, usage
+
+        except FatalLLMError:
+            # Same key / account for every model: rotating is pointless.
+            raise
 
         except RuntimeError as exc:
             notes.append(f"Model {model} thất bại: {exc}")

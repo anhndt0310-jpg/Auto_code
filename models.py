@@ -3,8 +3,8 @@ models.py — Pydantic schemas, enums, prompt constants, and config for the AI C
 """
 
 from enum import Enum
-from pydantic import BaseModel, Field
-from typing import Optional, Dict
+from pydantic import BaseModel, Field, field_validator
+from typing import Dict
 
 
 # ─────────────────────────── Role Enum & Metadata ───────────────────────────
@@ -45,6 +45,11 @@ FALLBACK_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 MAX_LOG_CHARS = 4000
 MAX_INSTRUCTION_CHARS = 4000
 REVIEW_ROUNDS = 2
+TOKEN_BUDGET_DEFAULT = 50000
+
+# Khi trọng tài (Tester) sửa test, số hàm test và số assert không được tụt
+# xuống dưới tỉ lệ này so với bản cũ — tránh "làm yếu" test cho Coder qua.
+MIN_TEST_KEEP_RATIO = 0.75
 
 
 # ─────────────────────────── Prompt Constants (original) ────────────────────
@@ -109,7 +114,7 @@ REVIEWER_PROMPT = (
 # ─────────────────────────── Pydantic Schemas ───────────────────────────────
 
 class RunRequest(BaseModel):
-    """Schema for a 'run' WebSocket message from the client."""
+    """Schema for a 'run' WebSocket message from the client (validated + clamped)."""
     type: str = "run"
     command: str
     project_text: str = ""
@@ -121,7 +126,34 @@ class RunRequest(BaseModel):
     use_planner: bool = True
     use_reviewer: bool = True
     max_rounds: int = Field(default=5, ge=1, le=20)
+    token_budget: int = TOKEN_BUDGET_DEFAULT
+    # True: dừng (có thể tiếp tục) khi chạm token_budget. False: chỉ cảnh báo.
+    hard_budget: bool = True
     api_key: str = ""
+    # Mã đồng bộ tùy chọn: dùng cùng mã trên mọi máy để thấy cùng lịch sử,
+    # kể cả khi đổi API key. Mặc định lịch sử gắn với API key.
+    profile: str = ""
+
+    @field_validator("max_rounds", mode="before")
+    @classmethod
+    def _clamp_rounds(cls, v):
+        try:
+            return max(1, min(20, int(v)))
+        except (TypeError, ValueError):
+            return 5
+
+    @field_validator("token_budget", mode="before")
+    @classmethod
+    def _coerce_budget(cls, v):
+        try:
+            return max(0, int(v or TOKEN_BUDGET_DEFAULT))
+        except (TypeError, ValueError):
+            return TOKEN_BUDGET_DEFAULT
+
+    @field_validator("use_planner", "use_reviewer", "hard_budget", mode="before")
+    @classmethod
+    def _default_true(cls, v):
+        return True if v is None else v
 
 
 class LogEvent(BaseModel):
