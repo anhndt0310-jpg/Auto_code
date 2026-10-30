@@ -7,13 +7,16 @@ continues from the stored stage/round instead of starting over:
 
     stage "planner"  -> "tester" -> "coder" (round N of M) -> "reviewer" (pass K) -> "done"
 
-Events are sent through an async ``send_event`` callback (same contract as before).
+Events are sent through an async ``send_event`` callback. New in this version: every reply of
+every role is also published as an ``agent`` event (role, model, title, content, status,
+tokens) so the UI can show the 4 roles in separate lanes — and replay them after a reconnect.
 No API key is ever stored in ``state``.
 """
 
 import asyncio
 import copy
 import logging
+import time
 from typing import Awaitable, Callable, Dict, List, Tuple
 
 from models import (
@@ -37,6 +40,8 @@ CONFIG_KEYS = (
     "reviewer_models", "use_planner", "use_reviewer", "max_rounds",
     "token_budget", "hard_budget",
 )
+
+AGENT_CONTENT_MAX = 12000       # chars kept per agent message (it is stored in SQLite)
 
 
 class BudgetExceeded(Exception):
@@ -63,7 +68,9 @@ def new_state(run_id: str, command: str, project_text: str, config: dict) -> dic
         parsed, _ = parse_files(project_text)
         project = parsed
     cfg = {k: config.get(k) for k in CONFIG_KEYS}
-    cfg["token_budget"] = int(cfg.get("token_budget") or TOKEN_BUDGET_DEFAULT)
+    # 0 means "no limit" — it must not be turned back into the default.
+    raw_budget = cfg.get("token_budget")
+    cfg["token_budget"] = TOKEN_BUDGET_DEFAULT if raw_budget is None else max(0, int(raw_budget))
     return {
         "version": 1,
         "run_id": run_id,
@@ -89,6 +96,13 @@ def _resolve_models(role_str: str, defaults: List[str]) -> List[str]:
 
 async def _log(send_event: SendEvent, role: str, message: str) -> None:
     await send_event({"type": "log", "role": role, "message": message})
+
+
+def _clip(text: str, limit: int = AGENT_CONTENT_MAX) -> str:
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n…(đã cắt bớt {len(text) - limit:,} ký tự)"
 
 
 def _accept_test_update(old: Dict[str, str], new: Dict[str, str]) -> bool:
@@ -155,6 +169,15 @@ async def run_pipeline(
             return f"{tokens_used:,} tokens ({pct}% budget)"
         return f"{tokens_used:,} tokens"
 
+    async def agent(role: str, model: str, title: str, content: str,
+                    status: str = "ok", usage: dict = None) -> None:
+        """Publish one reply of one role (status: ok | fail | warn | info)."""
+        await send_event({
+            "type": "agent", "role": role, "model": short(model) if model else "",
+            "title": title, "content": _clip(content), "status": status,
+            "tokens": (usage or {}).get("total_tokens", 0), "ts": time.time(),
+        })
+
     async def track(role: str, model: str, usage: dict) -> None:
         p = usage.get("prompt_tokens", 0) or 0
         c = usage.get("completion_tokens", 0) or 0
@@ -182,9 +205,9 @@ async def run_pipeline(
         ev = {
             "type": "tokens", "role": role, "model": short(model),
             "step_usage": {"prompt": p, "completion": c, "total": t},
-            "stats": tokens, "token_budget": budget, "percent_used": overall_pct,
+            "stats": copy.deepcopy(tokens), "token_budget": budget, "percent_used": overall_pct,
         }
-        state["last"]["tokens"] = copy.deepcopy(ev)
+        state["last"]["tokens"] = ev
         await send_event(ev)
 
     async def llm(role: str, models: List[str], start: int,
@@ -217,6 +240,9 @@ async def run_pipeline(
     async def write(files: Dict[str, str]) -> None:
         await asyncio.to_thread(write_project, workdir, files)
 
+    async def send_code() -> None:
+        await send_event({"type": "code", "files": dict(work)})
+
     # ── run ─────────────────────────────────────────────────────────────────
     try:
         # ────────── 1. Planner ──────────
@@ -237,6 +263,7 @@ async def run_pipeline(
                 await _log(send_event, "planner",
                            f"  ✓ {short(model)} đã lập xong đặc tả. "
                            f"(Dùng {budget_info(usage.get('total_tokens', 0))})")
+                await agent("planner", model, "Đặc tả", state["spec"], "ok", usage)
                 await send_event({"type": "spec", "content": state["spec"]})
                 await progress("planner", step_of["planner"], total_stages, "done")
             else:
@@ -270,6 +297,7 @@ async def run_pipeline(
                 new_tests = tests_of(parse_files(reply)[0])
                 if new_tests:
                     break
+                await agent("tester", model, "Chưa có file test hợp lệ", reply, "fail", usage)
                 tester_msgs.append({"role": "assistant", "content": reply})
                 tester_msgs.append({"role": "user", "content":
                                     "Chưa có file test_*.py hợp lệ. Hãy gửi lại đúng định dạng."})
@@ -282,15 +310,15 @@ async def run_pipeline(
             await _log(send_event, "tester",
                        f"  ✓ {short(model)} đã viết: {', '.join(sorted(new_tests))} "
                        f"(Dùng {budget_info(usage.get('total_tokens', 0))})")
-            await send_event({"type": "code", "files": work})
+            await agent("tester", model, "Viết test: " + ", ".join(sorted(new_tests)),
+                        format_project(new_tests), "ok", usage)
+            await send_code()
             await progress("tester", step_of["tester"], total_stages, "done")
             state["stage"] = "coder"
             await checkpoint(state)
 
         # ────────── 3. Coder (debug loop, resumes at the saved round) ──────────
         if state["stage"] == "coder":
-            await progress("coder", step_of["coder"], total_stages)
-
             while not state["ok"] and coder_st["round"] < max_rounds:
                 round_no = coder_st["round"] + 1
                 await _log(send_event, "coder",
@@ -317,12 +345,15 @@ async def run_pipeline(
                         "'### FILE: ten_file.py' rồi khối ```python.")
                     await _log(send_event, "coder",
                                "  ✗ Không có file code hợp lệ, yêu cầu gửi lại.")
+                    await agent("coder", model,
+                                f"Vòng {round_no}/{max_rounds}: không có file hợp lệ",
+                                reply, "fail", usage)
                     await checkpoint(state)
                     continue
 
                 work.update(code_files)
                 await write(work)
-                await send_event({"type": "code", "files": work})
+                await send_code()
                 await _log(send_event, "coder",
                            f"  Nhận code từ {short(model)}, đang chạy test... "
                            f"(Dùng {budget_info(usage.get('total_tokens', 0))})")
@@ -333,11 +364,17 @@ async def run_pipeline(
                     state["ok"] = True
                     coder_st["feedback"] = ""
                     await _log(send_event, "coder", f"  ✓ Test đạt ở vòng {round_no}.")
+                    await agent("coder", model, f"Vòng {round_no}/{max_rounds}: test đạt",
+                                format_project(code_files) + "\n\n**Kết quả pytest:**\n```\n"
+                                + tail(log, 1200) + "\n```", "ok", usage)
                     await checkpoint(state)
                     break
 
                 coder_st["fail_count"] += 1
                 await _log(send_event, "coder", "  ✗ Test chưa đạt:\n" + tail(log, 600))
+                await agent("coder", model, f"Vòng {round_no}/{max_rounds}: test chưa đạt",
+                            format_project(code_files) + "\n\n**Kết quả pytest:**\n```\n"
+                            + tail(log, 1500) + "\n```", "fail", usage)
                 feedback = ("Test bị lỗi. Log:\n```\n" + tail(log) + "\n```\n"
                             "Hãy sửa code (không sửa test) và gửi lại các file cần thay đổi.")
 
@@ -351,7 +388,7 @@ async def run_pipeline(
                            "Hãy xác định test có đúng đặc tả không. Nếu test SAI hoặc mâu thuẫn "
                            "đặc tả: trả lại file test đã sửa (đầy đủ, đúng định dạng). Nếu test ĐÚNG "
                            "và lỗi nằm ở code: chỉ trả lời đúng một từ TEST_OK.")
-                    reply2, _m2, _u2 = await llm(
+                    reply2, model2, usage2 = await llm(
                         "tester", tester_m, 0,
                         [{"role": "system", "content": TESTER_PROMPT},
                          {"role": "user", "content": arb}])
@@ -360,17 +397,26 @@ async def run_pipeline(
                         await _log(send_event, "tester",
                                    "  ⚠ Từ chối bản sửa test: làm giảm quá nhiều test/assert "
                                    "so với bản cũ. Giữ test hiện tại.")
+                        await agent("tester", model2, "Trọng tài: từ chối bản sửa test",
+                                    "Bản sửa làm giảm quá nhiều test/assert so với bản cũ nên "
+                                    "bị bỏ qua.\n\n" + format_project(fixed_tests), "warn", usage2)
                         fixed_tests = {}
                     if fixed_tests:
                         work.update(fixed_tests)
                         await write(work)
+                        await send_code()
                         await _log(send_event, "tester",
                                    f"  Test đã được sửa: {', '.join(sorted(fixed_tests))}")
+                        await agent("tester", model2, "Trọng tài: đã sửa test",
+                                    format_project(fixed_tests), "warn", usage2)
                         feedback += ("\n\nLưu ý: file test đã được cập nhật cho đúng đặc tả "
                                      "(xem phần test ở trên).")
                     else:
                         await _log(send_event, "tester",
                                    "  Test đúng đặc tả, lỗi nằm ở code.")
+                        if not tests_of(parse_files(reply2)[0]):
+                            await agent("tester", model2, "Trọng tài: test đúng đặc tả",
+                                        reply2, "info", usage2)
 
                 coder_st["feedback"] = feedback
                 await checkpoint(state)
@@ -400,10 +446,14 @@ async def run_pipeline(
                 if verdict.upper().startswith("LGTM"):
                     await _log(send_event, "reviewer",
                                f"  ✓ {short(model)}: không phát hiện lỗi thực sự.")
+                    await agent("reviewer", model, f"Review {rv}/{REVIEW_ROUNDS}: LGTM",
+                                "Không phát hiện lỗi thực sự.", "ok", usage)
                     rv_st["done"] = REVIEW_ROUNDS
                     break
                 await _log(send_event, "reviewer",
                            f"  Phát hiện vấn đề ({short(model)}):\n" + tail(verdict, 1200))
+                await agent("reviewer", model, f"Review {rv}/{REVIEW_ROUNDS}: có vấn đề",
+                            verdict, "warn", usage)
 
                 reply, model, usage = await llm(
                     "coder", coder_m, 0,
@@ -413,17 +463,21 @@ async def run_pipeline(
                 if not fixed:
                     await _log(send_event, "coder",
                                "  Lập trình viên không đưa ra bản sửa, giữ bản hiện tại.")
+                    await agent("coder", model, "Sửa theo review: không có bản sửa",
+                                reply, "fail", usage)
                     rv_st["done"] = REVIEW_ROUNDS
                     break
 
                 work.update(fixed)
-                ok2, _ = await asyncio.to_thread(verify, workdir, work, timeout)
+                ok2, log2 = await asyncio.to_thread(verify, workdir, work, timeout)
                 if ok2:
                     rv_st["good"] = dict(work)
                     rv_st["done"] = rv
-                    await send_event({"type": "code", "files": work})
+                    await send_code()
                     await _log(send_event, "coder",
                                f"  ✓ {short(model)} đã sửa theo review, test vẫn đạt.")
+                    await agent("coder", model, "Sửa theo review: test vẫn đạt",
+                                format_project(fixed), "ok", usage)
                     await checkpoint(state)
                 else:
                     work.clear()
@@ -431,6 +485,9 @@ async def run_pipeline(
                     await write(work)
                     await _log(send_event, "coder",
                                "  ✗ Bản sửa làm test fail, giữ bản trước review.")
+                    await agent("coder", model, "Sửa theo review: làm test fail (đã hoàn tác)",
+                                format_project(fixed) + "\n\n**Kết quả pytest:**\n```\n"
+                                + tail(log2, 1200) + "\n```", "fail", usage)
                     rv_st["done"] = REVIEW_ROUNDS
                     break
 
@@ -449,7 +506,6 @@ async def run_pipeline(
             "tokens": tokens,
         }
         if not state["ok"]:
-            # Code dở dang của Coder được giữ lại (không mất công); bản gốc của bạn ở đây:
             payload["original_files"] = project
         await send_event(payload)
         return final
@@ -460,7 +516,6 @@ async def run_pipeline(
                    f"⏸ Đã dùng {tokens['total']:,}/{budget:,} tokens. Tiến độ đã được lưu — "
                    "hãy Tiếp tục (kèm ngân sách lớn hơn) để chạy tiếp từ chỗ này.")
         await checkpoint(state)
-        # Gửi 'done' với paused=True để giao diện cũ cũng kết thúc gọn và vẫn tải được code.
         await send_event({
             "type": "done", "ok": False, "paused": True, "reason": "budget",
             "files": dict(work), "zip_url": f"/api/download/{run_id}",

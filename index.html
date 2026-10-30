@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Code Agent</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div class="shell">
+
+    <!-- ───────── Sidebar: lịch sử (lưu trên server, mở máy nào cũng thấy) ───────── -->
+    <aside class="sidebar" id="sidebar">
+        <div class="sidebar-head">
+            <strong>Lịch sử</strong>
+            <button type="button" class="btn-icon sidebar-close" onclick="toggleSidebar(false)" aria-label="Đóng">✕</button>
+        </div>
+        <div class="hist-tabs" role="tablist">
+            <button type="button" class="hist-tab active" data-htab="runs" onclick="switchHistTab('runs')">Lần chạy</button>
+            <button type="button" class="hist-tab" data-htab="chats" onclick="switchHistTab('chats')">Trò chuyện</button>
+        </div>
+        <div class="hist-list" id="hist-runs"></div>
+        <div class="hist-list hidden" id="hist-chats"></div>
+        <div class="sidebar-foot">
+            <button type="button" class="btn btn-xs btn-ghost" onclick="exportHistory()">Sao lưu</button>
+            <button type="button" class="btn btn-xs btn-ghost" onclick="document.getElementById('import-file').click()">Khôi phục</button>
+            <input type="file" id="import-file" accept=".json,application/json" class="hidden" onchange="importHistory(event)">
+        </div>
+    </aside>
+    <div class="scrim" id="scrim" onclick="toggleSidebar(false)"></div>
+
+    <main class="main">
+        <!-- Header -->
+        <header class="header">
+            <div class="header-left">
+                <button type="button" class="btn btn-sm btn-ghost menu-btn" onclick="toggleSidebar(true)" aria-label="Mở lịch sử">☰</button>
+                <span class="logo" id="app-logo">🤖</span>
+                <h1 id="app-title">AI Code Agent</h1>
+            </div>
+            <div class="header-right">
+                <div class="credits-pill" title="Số dư tài khoản OpenRouter còn lại">
+                    <span id="credits-amount">💳 $--</span>
+                    <button type="button" class="btn-icon" onclick="fetchCredits(true)" title="Kiểm tra lại số dư" aria-label="Kiểm tra lại số dư">🔄</button>
+                </div>
+                <button type="button" class="btn btn-sm btn-ghost" onclick="openThemeModal()">🎨 Giao diện</button>
+                <div class="conn-indicator" title="Trạng thái kết nối tới server">
+                    <span id="conn-status" class="conn-dot"></span>
+                    <span id="conn-text">Chưa kết nối</span>
+                </div>
+            </div>
+        </header>
+
+        <div id="conn-banner" class="banner hidden" role="status"></div>
+
+        <!-- Kết nối -->
+        <section class="card">
+            <label for="api-key">🔑 OpenRouter API Key</label>
+            <div class="row">
+                <input type="password" id="api-key" placeholder="sk-or-..." autocomplete="off">
+                <button type="button" id="btn-save-key" class="btn btn-sm btn-primary" onclick="saveApiKey()">Lưu</button>
+                <button type="button" class="btn btn-sm btn-ghost" onclick="toggleKeyVisibility()" title="Hiện/ẩn key">👁</button>
+                <button type="button" class="btn btn-sm btn-ghost btn-danger-text" onclick="clearApiKey()" title="Xóa key khỏi trình duyệt">🗑️</button>
+            </div>
+            <details class="adv">
+                <summary>Đồng bộ nhiều máy &amp; bảo mật</summary>
+                <div class="adv-grid">
+                    <div class="field">
+                        <label for="profile-code">Mã đồng bộ (tùy chọn)</label>
+                        <input type="text" id="profile-code" placeholder="Dùng cùng mã trên mọi máy" autocomplete="off">
+                        <small>Có mã này, lịch sử gắn với mã thay vì API key — đổi key vẫn thấy lịch sử cũ.</small>
+                    </div>
+                    <div class="field">
+                        <label for="app-token">APP_TOKEN của server (nếu có)</label>
+                        <input type="password" id="app-token" placeholder="Để trống nếu server không đặt" autocomplete="off">
+                    </div>
+                </div>
+                <button type="button" class="btn btn-sm btn-ghost" onclick="saveConnection()">Lưu &amp; kết nối lại</button>
+            </details>
+        </section>
+
+        <!-- Nhập yêu cầu -->
+        <section class="card" id="drop-zone">
+            <div class="mode-row">
+                <div class="seg" role="tablist" aria-label="Chế độ">
+                    <button type="button" class="seg-btn active" id="btn-mode-pipeline" onclick="switchMode('pipeline')">⚡ Lập trình tự động</button>
+                    <button type="button" class="seg-btn" id="btn-mode-chat" onclick="switchMode('chat')">💬 Trò chuyện</button>
+                </div>
+                <span id="run-chip" class="chip hidden"></span>
+            </div>
+
+            <div class="field">
+                <label for="command" id="input-label">📝 Yêu cầu lập trình của bạn</label>
+                <textarea id="command" rows="3"
+                    placeholder="Ví dụ: Tạo logic tính cashback 5% cho đơn hàng, tối đa 50.000đ"></textarea>
+            </div>
+
+            <div class="attach">
+                <button type="button" class="btn btn-sm btn-ghost" onclick="triggerFileUpload()">📎 Đính kèm file (.py, .txt, .zip…)</button>
+                <input type="file" id="file-uploader" multiple accept=".py,.txt,.md,.json,.csv,.html,.css,.js,.zip" class="hidden" onchange="handleFileUpload(event)">
+                <span class="hint" id="attachment-hint">Hoặc kéo thả file vào khung này</span>
+                <div class="chips" id="attached-chips-list"></div>
+            </div>
+
+            <div class="row actions">
+                <button type="button" id="btn-run" class="btn btn-primary" onclick="handleMainAction()">▶ Chạy (4 AI)</button>
+                <button type="button" id="btn-resume" class="btn btn-accent hidden" onclick="resumeRun()">⏯ Tiếp tục</button>
+                <button type="button" id="btn-stop" class="btn btn-danger" onclick="stop()" disabled>⏹ Dừng</button>
+                <button type="button" id="btn-reset" class="btn btn-ghost" onclick="newSession()">＋ Phiên mới</button>
+            </div>
+        </section>
+
+        <!-- ───────── Chế độ lập trình ───────── -->
+        <div id="pipeline-panel">
+            <ol class="stepper" id="stepper" aria-label="Tiến độ">
+                <li class="step pending" data-stage="planner"><span class="step-ico">📐</span><span class="step-txt"><b>Kiến trúc sư</b><small class="step-sub">Chờ</small></span></li>
+                <li class="step pending" data-stage="tester"><span class="step-ico">🧪</span><span class="step-txt"><b>Kiểm thử viên</b><small class="step-sub">Chờ</small></span></li>
+                <li class="step pending" data-stage="coder"><span class="step-ico">💻</span><span class="step-txt"><b>Lập trình viên</b><small class="step-sub">Chờ</small></span></li>
+                <li class="step pending" data-stage="reviewer"><span class="step-ico">🔍</span><span class="step-txt"><b>Reviewer</b><small class="step-sub">Chờ</small></span></li>
+            </ol>
+
+            <div id="token-tracker" class="token-tracker hidden">
+                <div class="token-line">
+                    <span class="token-title">📊 Token</span>
+                    <span class="token-badge-total" id="token-total-count">0 tokens</span>
+                    <span class="token-sub-detail" id="token-detail">(Prompt: 0 | Output: 0)</span>
+                    <span class="token-sub-detail" id="token-budget-label"></span>
+                </div>
+                <div class="token-bar"><div class="token-bar-fill" id="token-bar-fill"></div></div>
+            </div>
+
+            <div class="tabs-container">
+                <div class="tabs-nav" role="tablist">
+                    <button type="button" class="tab active" data-tab="agents" onclick="switchTab('agents')">🧠 4 AI</button>
+                    <button type="button" class="tab" data-tab="log" onclick="switchTab('log')">📋 Nhật ký</button>
+                    <button type="button" class="tab" data-tab="spec" onclick="switchTab('spec')">📐 Đặc tả</button>
+                    <button type="button" class="tab" data-tab="code" onclick="switchTab('code')">💻 Code</button>
+                    <button type="button" class="tab" data-tab="download" onclick="switchTab('download')">📁 Tải về</button>
+                </div>
+
+                <div id="tab-agents" class="tab-content active">
+                    <div class="filter-row" id="agent-filter">
+                        <button type="button" class="fchip active" data-filter="all" onclick="setLaneFilter('all')">Tất cả</button>
+                        <button type="button" class="fchip" data-filter="planner" onclick="setLaneFilter('planner')">📐 Kiến trúc sư</button>
+                        <button type="button" class="fchip" data-filter="tester" onclick="setLaneFilter('tester')">🧪 Kiểm thử</button>
+                        <button type="button" class="fchip" data-filter="coder" onclick="setLaneFilter('coder')">💻 Lập trình</button>
+                        <button type="button" class="fchip" data-filter="reviewer" onclick="setLaneFilter('reviewer')">🔍 Reviewer</button>
+                    </div>
+                    <div class="agents-grid" id="agents-grid" data-filter="all"></div>
+                </div>
+
+                <div id="tab-log" class="tab-content">
+                    <div id="log-area" class="log-area"><div class="log-placeholder">Nhấn “Chạy” để bắt đầu…</div></div>
+                </div>
+
+                <div id="tab-spec" class="tab-content">
+                    <div id="spec-area" class="spec-area"><div class="log-placeholder">Đặc tả sẽ hiện ở đây sau khi kiến trúc sư hoàn thành.</div></div>
+                </div>
+
+                <div id="tab-code" class="tab-content">
+                    <div id="file-tabs" class="file-tabs"></div>
+                    <textarea id="code-area" class="code-area" spellcheck="false"
+                        placeholder="Code sẽ hiện ở đây. Bạn cũng có thể dán code hiện có vào trước khi chạy."></textarea>
+                </div>
+
+                <div id="tab-download" class="tab-content">
+                    <div class="download-area">
+                        <div id="download-status" class="log-placeholder">Chưa có file để tải.</div>
+                        <button type="button" id="btn-download" class="btn btn-primary btn-lg hidden" onclick="downloadZip()">📦 Tải project.zip</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ───────── Chế độ trò chuyện ───────── -->
+        <div id="chat-panel" class="chat-panel hidden">
+            <div class="chat-bar">
+                <span class="hint" id="chat-title">Cuộc trò chuyện mới</span>
+                <button type="button" class="btn btn-xs btn-ghost" id="btn-new-chat" onclick="newChat()">＋ Cuộc trò chuyện mới</button>
+            </div>
+            <div class="chat-list" id="chat-list">
+                <div class="log-placeholder" id="chat-empty">Hỏi AI bất cứ điều gì. Tin nhắn được lưu trên server — mở máy khác vẫn thấy.</div>
+            </div>
+        </div>
+
+        <!-- Cài đặt model -->
+        <section class="card">
+            <button type="button" class="settings-toggle" onclick="toggleSettings()">
+                <span>⚙️ Model, số vòng và ngân sách</span>
+                <span id="settings-arrow">▸</span>
+            </button>
+
+            <div class="preset-container">
+                <div class="preset-top-row">
+                    <span class="preset-title">Cấu hình có sẵn</span>
+                    <div class="preset-global-actions">
+                        <button type="button" class="btn btn-xs btn-ghost" onclick="addNewPreset()">+ Thêm mới</button>
+                        <button type="button" class="btn btn-xs btn-ghost" onclick="resetToDefaultPresets()">Khôi phục gốc</button>
+                    </div>
+                </div>
+                <div class="preset-buttons" id="preset-buttons-container"></div>
+            </div>
+
+            <div id="settings-body" class="settings-body hidden">
+                <div class="settings-sub-header">
+                    <div class="preset-current-indicator">
+                        <span>Đang chọn: <strong id="current-preset-name">…</strong></span>
+                        <button type="button" class="btn btn-xs btn-ghost" onclick="renameCurrentPreset()">✏️ Đổi tên</button>
+                    </div>
+                    <div class="custom-preset-actions">
+                        <button type="button" class="btn btn-sm btn-primary" onclick="saveCurrentPresetChanges()">💾 Lưu thay đổi</button>
+                        <button type="button" class="btn btn-sm btn-ghost btn-danger-text" onclick="deleteCurrentPreset()">🗑️ Xóa</button>
+                    </div>
+                </div>
+                <div class="settings-grid">
+                    <div class="field"><label for="default-models">Model mặc định</label>
+                        <input type="text" id="default-models" value="deepseek/deepseek-chat, google/gemini-2.0-flash-001"></div>
+                    <div class="field"><label for="planner-models">📐 Kiến trúc sư</label>
+                        <input type="text" id="planner-models" placeholder="Để trống = mặc định"></div>
+                    <div class="field"><label for="tester-models">🧪 Kiểm thử viên</label>
+                        <input type="text" id="tester-models" placeholder="Để trống = mặc định"></div>
+                    <div class="field"><label for="coder-models">💻 Lập trình viên</label>
+                        <input type="text" id="coder-models" placeholder="Để trống = mặc định"></div>
+                    <div class="field"><label for="reviewer-models">🔍 Reviewer</label>
+                        <input type="text" id="reviewer-models" placeholder="Để trống = mặc định"></div>
+                    <div class="field"><label for="token-budget">Ngân sách token (0 = không giới hạn)</label>
+                        <input type="number" id="token-budget" min="0" step="10000" value="200000"></div>
+                </div>
+                <div class="settings-row">
+                    <label class="checkbox-label"><input type="checkbox" id="use-planner" checked> Dùng kiến trúc sư</label>
+                    <label class="checkbox-label"><input type="checkbox" id="use-reviewer" checked> Dùng reviewer</label>
+                    <label class="checkbox-label"><input type="checkbox" id="hard-budget" checked> Chạm ngân sách thì tạm dừng (không chỉ cảnh báo)</label>
+                    <label class="checkbox-label"><input type="checkbox" id="auto-resume" checked onchange="store.set('auto_resume', this.checked ? '1' : '0')"> Tự tiếp tục khi lỗi / server khởi động lại</label>
+                </div>
+                <div class="field">
+                    <label for="max-rounds">Số vòng sửa lỗi tối đa: <strong id="rounds-val">5</strong></label>
+                    <input type="range" id="max-rounds" min="1" max="8" value="5"
+                        oninput="document.getElementById('rounds-val').textContent=this.value">
+                </div>
+            </div>
+        </section>
+    </main>
+</div>
+
+<!-- Theme modal -->
+<div id="theme-modal" class="modal-backdrop hidden" onclick="if(event.target===this)closeThemeModal()">
+    <div class="modal-card">
+        <div class="modal-header">
+            <h3>🎨 Tên ứng dụng &amp; giao diện</h3>
+            <button type="button" class="modal-close-btn" onclick="closeThemeModal()" aria-label="Đóng">✕</button>
+        </div>
+        <div class="modal-body">
+            <div class="field"><label for="custom-app-title">Tên ứng dụng</label>
+                <input type="text" id="custom-app-title" placeholder="AI Code Agent"></div>
+            <div class="field"><label>Logo (emoji)</label>
+                <div class="emoji-picker-row">
+                    <button type="button" class="emoji-opt" onclick="setLogoEmoji('🤖')">🤖</button>
+                    <button type="button" class="emoji-opt" onclick="setLogoEmoji('⚡')">⚡</button>
+                    <button type="button" class="emoji-opt" onclick="setLogoEmoji('🚀')">🚀</button>
+                    <button type="button" class="emoji-opt" onclick="setLogoEmoji('🧠')">🧠</button>
+                    <button type="button" class="emoji-opt" onclick="setLogoEmoji('💻')">💻</button>
+                    <button type="button" class="emoji-opt" onclick="setLogoEmoji('🔮')">🔮</button>
+                    <input type="text" id="custom-app-logo" maxlength="4" style="width:55px;text-align:center" placeholder="Khác">
+                </div></div>
+            <div class="field"><label>Màu chủ đạo</label>
+                <div class="color-picker-row">
+                    <button type="button" class="color-swatch" style="background:#58a6ff" onclick="setThemeAccent('#58a6ff')" aria-label="Xanh lam"></button>
+                    <button type="button" class="color-swatch" style="background:#a78bfa" onclick="setThemeAccent('#a78bfa')" aria-label="Tím"></button>
+                    <button type="button" class="color-swatch" style="background:#3fb950" onclick="setThemeAccent('#3fb950')" aria-label="Xanh lá"></button>
+                    <button type="button" class="color-swatch" style="background:#f0883e" onclick="setThemeAccent('#f0883e')" aria-label="Cam"></button>
+                    <button type="button" class="color-swatch" style="background:#f43f5e" onclick="setThemeAccent('#f43f5e')" aria-label="Hồng"></button>
+                    <button type="button" class="color-swatch" style="background:#22d3ee" onclick="setThemeAccent('#22d3ee')" aria-label="Cyan"></button>
+                    <input type="color" id="custom-accent-color" onchange="setThemeAccent(this.value)">
+                </div></div>
+            <div class="field"><label>Nền</label>
+                <div class="theme-bg-row">
+                    <label class="radio-label"><input type="radio" name="theme-bg" value="github" checked onchange="setThemeBg(this.value)"><span>GitHub Dark</span></label>
+                    <label class="radio-label"><input type="radio" name="theme-bg" value="oled" onchange="setThemeBg(this.value)"><span>OLED đen</span></label>
+                    <label class="radio-label"><input type="radio" name="theme-bg" value="midnight" onchange="setThemeBg(this.value)"><span>Midnight Navy</span></label>
+                    <label class="radio-label"><input type="radio" name="theme-bg" value="slate" onchange="setThemeBg(this.value)"><span>Slate</span></label>
+                </div></div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-ghost" onclick="resetThemeDefaults()">Khôi phục mặc định</button>
+            <button type="button" class="btn btn-primary" onclick="saveThemeSettings()">Lưu &amp; áp dụng</button>
+        </div>
+    </div>
+</div>
+
+<div id="toast-container" class="toast-container" aria-live="polite"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

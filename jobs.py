@@ -5,10 +5,12 @@ A job is an asyncio task running ``run_pipeline`` for one run. Clients (WebSocke
 *subscribe* to it: closing the browser tab, losing Wi-Fi or switching machine does NOT stop
 the job. A client can re-attach later (``attach``) and gets:
     1. a snapshot of the current state (spec, files, progress, token stats), and
-    2. the log lines it missed (by sequence number).
+    2. the log / agent events it missed (by sequence number).
 
 Every checkpoint is written to SQLite, so even if the server process dies the run can be
 continued with ``resume`` (the API key has to be supplied again — it is never stored).
+A run stopped because the *server shut down* gets status "interrupted" (clients resume it
+automatically); a run stopped by the user gets "stopped".
 """
 
 import asyncio
@@ -25,7 +27,8 @@ from store import get_store
 logger = logging.getLogger(__name__)
 
 LOG_BUFFER_MAX = 2000
-PERSISTED_EVENT_TYPES = ("log", "error")
+# Events that get a sequence number, are replayed to late clients and stored in SQLite.
+PERSISTED_EVENT_TYPES = ("log", "error", "agent")
 
 Push = Callable[[dict], Awaitable[None]]
 
@@ -57,6 +60,7 @@ def build_snapshot(run_id: str, status: str, state: dict) -> List[dict]:
         "stage": state.get("stage"), "command": state.get("command", ""),
         "ok": state.get("ok", False), "paused": state.get("paused"),
         "round": (state.get("coder") or {}).get("round", 0),
+        "files": len(state.get("work") or {}),
     }]
     if state.get("spec"):
         events.append({"type": "spec", "content": state["spec"]})
@@ -112,7 +116,7 @@ class Job:
         t.add_done_callback(self._bg.discard)
 
     def attach(self, push: Push, after_seq: int = 0) -> Subscriber:
-        """Subscribe a client. Snapshot + missed logs are queued before any live event."""
+        """Subscribe a client. Snapshot + missed events are queued before any live event."""
         sub = Subscriber(push)
         sub.queue.extend(build_snapshot(self.run_id, "running", self.state))
         sub.queue.extend(e for e in self.buf if e.get("seq", 0) > after_seq)
@@ -133,16 +137,20 @@ class Job:
 class JobManager:
     def __init__(self) -> None:
         self.jobs: Dict[str, Job] = {}
+        self.closing = False        # True while the server shuts down
 
     def get(self, run_id: Optional[str]) -> Optional[Job]:
         return self.jobs.get(run_id) if run_id else None
 
     async def start(self, run_id: str, user_id: str, state: dict, api_key: str) -> Job:
         """Start (or continue, if *state* is a checkpoint) a run in the background."""
+        existing = self.jobs.get(run_id)
+        if existing and existing.running:
+            return existing
         store = get_store()
         seq = await asyncio.to_thread(store.max_seq, run_id)
         buf = await asyncio.to_thread(store.get_events, run_id, max(0, seq - LOG_BUFFER_MAX))
-        existing = self.jobs.get(run_id)
+        existing = self.jobs.get(run_id)            # re-check: we awaited above
         if existing and existing.running:
             return existing
         job = Job(run_id, user_id, state, seq=seq, buf=buf)
@@ -159,6 +167,7 @@ class JobManager:
 
     async def shutdown(self) -> None:
         """Server shutting down: stop every job but let each save its checkpoint first."""
+        self.closing = True
         tasks = []
         for job in list(self.jobs.values()):
             if job.running:
@@ -189,9 +198,13 @@ class JobManager:
                 status = "done" if state.get("ok") else "failed"
 
         except asyncio.CancelledError:
-            status = "stopped"
-            await job.emit({"type": "log", "role": "system",
-                            "message": "⏹️ Đã dừng — tiến độ đã được lưu, bạn có thể tiếp tục."})
+            if self.closing:
+                status = "interrupted"
+                msg = "⏸ Server đang khởi động lại — tiến độ đã được lưu, sẽ tự chạy tiếp."
+            else:
+                status = "stopped"
+                msg = "⏹️ Đã dừng — tiến độ đã được lưu, bạn có thể tiếp tục."
+            await job.emit({"type": "log", "role": "system", "message": msg})
 
         except Exception as exc:  # run_pipeline already reported it via an 'error' event
             logger.error("Run %s failed: %s", run_id, exc)
@@ -204,5 +217,7 @@ class JobManager:
             except BaseException:
                 logger.exception("Could not save final state of %s", run_id)
             shutil.rmtree(workdir, ignore_errors=True)
-            await job.emit({"type": "run_status", "run_id": run_id, "status": status})
-            self.jobs.pop(run_id, None)
+            await job.emit({"type": "run_status", "run_id": run_id, "status": status,
+                            "ok": bool(state.get("ok"))})
+            if self.jobs.get(run_id) is job:
+                self.jobs.pop(run_id, None)
